@@ -10,3 +10,6 @@ mbrfs: mbrfs.c
 
 test: force
 	./mbrfs test.img -f test
+
+install: mbrfs
+	install -Dm 0755 mbrfs $(DESTDIR)/bin/mbrfs
