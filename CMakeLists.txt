@@ -6,6 +6,7 @@ set(CMAKE_MODULE_PATH "${CMAKE_MODULE_PATH}" "${CMAKE_SOURCE_DIR}/cmake")
 include(CheckSymbolExists)
 include(FindPkgConfig)
 include(GNUInstallDirs)
+include(Hardening)
 
 set(PROJECT_VERSION_MAJOR 0)
 set(PROJECT_VERSION_MINOR 1)
@@ -66,6 +67,8 @@ add_executable(mbrfs "mbrfs.c")
 target_include_directories(mbrfs PRIVATE "${CMAKE_SOURCE_DIR}" "${FUSE_INCLUDE_DIRS}")
 target_link_libraries(mbrfs PRIVATE "${FUSE_LINK_LIBRARIES}")
 target_compile_definitions(mbrfs PRIVATE "${FUSE_CFLAGS_OTHER}" "-DHAVE_CONFIG_H")
+
+harden(mbrfs)
 
 install(TARGETS mbrfs RUNTIME)
 
