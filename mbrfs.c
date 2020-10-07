@@ -4,14 +4,16 @@
   Copyright (C) 2011       Sebastian Pipping <sebastian@pipping.org>
 
   This program can be distributed under the terms of the GNU GPL.
-  See the file COPYING.
+  See the file LICENSE.
 
 */
 
-#define FUSE_USE_VERSION 30
+#define FUSE_USE_VERSION 39
 
 #ifdef HAVE_CONFIG_H
-#include <config.h>
+#include "config.h"
+#else
+const char OUR_TOOL_VERSION[] = "Unknown version";
 #endif
 
 #ifdef linux
@@ -22,6 +24,9 @@
 #include <fuse.h>
 #include <stdbool.h>
 #include <stdio.h>
+#ifdef HAVE_ATOI
+#include <stdlib.h>
+#endif
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -32,6 +37,17 @@
 #ifdef HAVE_SETXATTR
 #include <sys/xattr.h>
 #endif
+
+#if defined(__cplusplus) && __cplusplus >= 201703L
+	#define MAYBE_UNUSED [[maybe_unused]]
+#else
+	#if defined(__GNUC__) || defined(__clang__)
+		#define MAYBE_UNUSED __attribute__ ((unused))
+	#else
+		#define MAYBE_UNUSED
+	#endif
+#endif
+
 
 // DEBUG: FUSE calls
 #define LOG(text) do{}while(0)// printf(text "\n")
@@ -67,41 +83,55 @@ struct stat devStat;
 
 #define MAX_FD 64
 pdescriptor fds[MAX_FD];
-int freefdindex = 0;
-size_t blksize = 512;
+uint64_t freefdindex = 0;
+enum{
+	blksize = 512
+};
 
 bool isroot(const char *path) {
 	return path[0] == '/' && path[1] == '\0';
 }
 
-int pindex(const char *path) {
+uint8_t pindex(const char *path) {
 	int i = 0;
 	if (path[i] == '/') { i++; }
+	#ifdef HAVE_ATOI
+	int res = atoi(path + i);
+	#else
 	int res = path[i]-'1';
-	if (res >= 0 && res < 4) { return res; }
-	return -1;
+	#endif
+	if (res >= 0 && res < 4) { return (uint8_t) res; }
+	return 0xFF;
 }
-void getchs(chs s,uint8_t *head,uint8_t *sector,uint16_t *cylinder) {
-	*head = s[0];
-	*sector = s[1] >> 3;
-	*cylinder = (s[2] << 2) | (s[1] >> 6);
-}
-off_t chstolba(chs s) {
+
+struct chs_unpacked{
 	uint8_t head;
 	uint8_t sector;
 	uint16_t cylinder;
-	getchs(s,&head,&sector,&cylinder);
+};
+
+struct chs_unpacked getchs(chs s) {
+	struct chs_unpacked res = {
+		s[0],
+		(uint8_t)(s[1] >> 3),
+		(uint16_t)((s[2] << 2) | (s[1] >> 6))
+	};
+	return res;
+}
+
+off_t chstolba(chs s) {
+	struct chs_unpacked chs_unp = getchs(s);
 	blksize_t blksize = devStat.st_blksize;
-	return head*sector*cylinder*blksize;
+	return chs_unp.head*chs_unp.sector*chs_unp.cylinder*blksize;
 }
 off_t poffset(int pIndex) {
 	pentry p = mbr.partitions[pIndex];
-	return ((size_t)p.firstSectorLBA)*blksize;
+	return ((off_t)p.firstSectorLBA)*blksize;
 	//return chstolba(p.firstSector);
 }
-size_t psize(int pIndex) {
+ssize_t psize(int pIndex) {
 	pentry p = mbr.partitions[pIndex];
-	return ((size_t)p.sectorCount)*blksize;
+	return ((ssize_t)p.sectorCount)*blksize;
 	//return p.sectorCount*devStat.st_blksize;
 }
 
@@ -118,8 +148,8 @@ int initstat(struct stat *st) {
 	st->st_blocks = devStat.st_blksize;
 	return 0;
 }
-int plstat(int pi, struct stat *st) {
-	st->st_rdev = 0x0100 | pi+1;
+int plstat(uint8_t pi, struct stat *st) {
+	st->st_rdev = 0x0100 | (pi + 1);
 	st->st_ino = pi;
 	st->st_size = psize(pi);
 	st->st_blocks = st->st_size/512;
@@ -127,31 +157,32 @@ int plstat(int pi, struct stat *st) {
 }
 
 
-static int partfuse_getattr(const char *path, struct stat *st)
-{
-	int res;
+static int partfuse_getattr(const char *path, struct stat *st
+#if FUSE_MAJOR_VERSION >= 3
+, MAYBE_UNUSED struct fuse_file_info *fi
+#endif
+){
 	LOGF("getattr",path);
 
 	if (isroot(path)) { return stat(path,st); }
 
-	int pi = pindex(path);
-	if (pi < 0) { return -ENOENT; }
+	uint8_t pi = pindex(path);
+	if (pi == 0xFF) { return -ENOENT; }
 	initstat(st);
-	return plstat(pi,st);
+	return plstat(pi, st);
 }
 
-static int partfuse_access(const char *path, int mask)
+static int partfuse_access(const char *path, MAYBE_UNUSED int mask)
 {
-	int res;
 	LOGF("access",path);
 	int pi = pindex(path);
-	if (pi < 0) { return -ENOENT; }
+	if (pi == 0xFF) { return -ENOENT; }
 	return 0;
 }
 
 static int partfuse_readlink(const char *path, char *buf, size_t size)
 {
-	int res;
+	ssize_t res;
 	LOGF("readlink",path);
 
 	res = readlink(path, buf, size - 1);
@@ -162,13 +193,13 @@ static int partfuse_readlink(const char *path, char *buf, size_t size)
 	return 0;
 }
 
-
-static int partfuse_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
-		       off_t offset, struct fuse_file_info *fi)
+static int partfuse_readdir(MAYBE_UNUSED const char *path, void *buf, fuse_fill_dir_t filler,
+		       off_t offset, struct fuse_file_info *fi
+#if FUSE_MAJOR_VERSION >= 3
+	, MAYBE_UNUSED enum fuse_readdir_flags flags
+#endif
+)
 {
-	DIR *dp;
-	struct dirent *de;
-
 	(void) offset;
 	(void) fi;
 
@@ -178,82 +209,106 @@ static int partfuse_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 	struct stat st;
 	initstat(&st);
 
-	int pi;
+	uint8_t pi;
 	for(pi=0;pi<4;pi++) {
 		pentry *entry = &mbr.partitions[pi];
 		if (entry->type == 0) { continue; }
 
 		plstat(pi,&st);
-		name[0] = '1'+pi;
-		if (filler(buf, name, &st, 0))
+		name[0] = (char)('1' + pi);
+		if (filler(buf, name, &st, 0
+			#if FUSE_MAJOR_VERSION >= 3
+			, FUSE_FILL_DIR_PLUS
+			#endif
+		))
 			return 0;
 	}
 	return 0;
 }
 
-static int partfuse_mknod(const char *path, mode_t mode, dev_t rdev)
+static int partfuse_mknod(MAYBE_UNUSED const char *path, MAYBE_UNUSED mode_t mode, MAYBE_UNUSED dev_t rdev)
 {
 	LOGF("mknod",path);
 
 	return -EOPNOTSUPP;
 }
 
-static int partfuse_mkdir(const char *path, mode_t mode)
+static int partfuse_mkdir(MAYBE_UNUSED const char *path, MAYBE_UNUSED mode_t mode)
 {
 	LOGF("mkdir",path);
 	return -EOPNOTSUPP;
 }
 
-static int partfuse_unlink(const char *path)
+static int partfuse_unlink(MAYBE_UNUSED const char *path)
 {
 	LOGF("unlink",path);
 	return -EOPNOTSUPP;
 }
 
-static int partfuse_rmdir(const char *path)
+static int partfuse_rmdir(MAYBE_UNUSED const char *path)
 {
 	LOGF("rmdir",path);
 	return -EOPNOTSUPP;
 }
 
-static int partfuse_symlink(const char *from, const char *to)
+static int partfuse_symlink(MAYBE_UNUSED const char *from, MAYBE_UNUSED const char *to)
 {
 	LOGF("symlink",from);
 	return -EOPNOTSUPP;
 }
 
-static int partfuse_rename(const char *from, const char *to)
+static int partfuse_rename(MAYBE_UNUSED const char *from, MAYBE_UNUSED const char *to
+#if FUSE_MAJOR_VERSION >= 3
+, MAYBE_UNUSED unsigned int flags
+#endif
+)
 {
 	LOGF("rename",from);
 	return -EOPNOTSUPP;
 }
 
-static int partfuse_link(const char *from, const char *to)
+static int partfuse_link(MAYBE_UNUSED const char *from, MAYBE_UNUSED const char *to)
 {
 	LOGF("link",from);
 	return -EOPNOTSUPP;
 }
 
-static int partfuse_chmod(const char *path, mode_t mode)
+static int partfuse_chmod(MAYBE_UNUSED const char *path, MAYBE_UNUSED mode_t mode
+#if FUSE_MAJOR_VERSION >= 3
+, MAYBE_UNUSED struct fuse_file_info *fi
+#endif
+)
 {
 	LOGF("chmod",path);
 	return -EOPNOTSUPP;
 }
 
-static int partfuse_chown(const char *path, uid_t uid, gid_t gid)
+static int partfuse_chown(MAYBE_UNUSED const char *path, MAYBE_UNUSED uid_t uid, MAYBE_UNUSED gid_t gid
+#if FUSE_MAJOR_VERSION >= 3
+, MAYBE_UNUSED struct fuse_file_info *fi
+#endif
+)
 {
 	LOGF("chown",path);
 	return -EOPNOTSUPP;
 }
 
-static int partfuse_truncate(const char *path, off_t size)
+static int partfuse_truncate(MAYBE_UNUSED const char *path, MAYBE_UNUSED off_t size
+#if FUSE_MAJOR_VERSION >= 3
+, MAYBE_UNUSED struct fuse_file_info *fi
+#endif
+)
 {
 	LOGF("truncate",path);
 	return -EOPNOTSUPP;
 }
 
 #ifdef HAVE_UTIMENSAT
-static int partfuse_utimens(const char *path, const struct timespec ts[2])
+static int partfuse_utimens(const char *path, const struct timespec ts[2]
+#if FUSE_MAJOR_VERSION >= 3
+	, MAYBE_UNUSED struct fuse_file_info *fi
+#endif
+)
 {
 	int res;
 
@@ -268,11 +323,10 @@ static int partfuse_utimens(const char *path, const struct timespec ts[2])
 
 static int partfuse_open(const char *path, struct fuse_file_info *fi)
 {
-	int res;
 	LOGF("open",path);
 	int pi = pindex(path);
-	if (pi < 0) { return -ENOENT; }
-	int fdi = freefdindex;
+	if (pi == 0xFF) { return -ENOENT; }
+	uint64_t fdi = freefdindex;
 
 	// Find new empty freefdindex
 	while (fds[freefdindex].taken) {
@@ -286,11 +340,9 @@ static int partfuse_open(const char *path, struct fuse_file_info *fi)
 	return 0;
 }
 
-static int partfuse_read(const char *path, char *buf, size_t size, off_t offset,
+static int partfuse_read(MAYBE_UNUSED const char *path, char *buf, size_t size, off_t offset,
 		    struct fuse_file_info *fi)
 {
-	int fd;
-	int res;
 	LOGF("read",path);
 	pdescriptor *pd = &fds[fi->fh];
 	off_t poff = poffset(pd->pIndex);
@@ -298,7 +350,7 @@ static int partfuse_read(const char *path, char *buf, size_t size, off_t offset,
 	return read(pd->fd,buf,size);
 }
 
-static int partfuse_write(const char *path, const char *buf, size_t size,
+static int partfuse_write(MAYBE_UNUSED const char *path, const char *buf, size_t size,
 		     off_t offset, struct fuse_file_info *fi)
 {
 	LOGF("write",path);
@@ -346,11 +398,9 @@ static int partfuse_fsync(const char *path, int isdatasync,
 }
 
 #ifdef HAVE_POSIX_FALLOCATE
-static int partfuse_fallocate(const char *path, int mode,
-			off_t offset, off_t length, struct fuse_file_info *fi)
+static int partfuse_fallocate(MAYBE_UNUSED const char *path, MAYBE_UNUSED int mode,
+			MAYBE_UNUSED off_t offset, MAYBE_UNUSED off_t length, struct fuse_file_info *fi)
 {
-	int fd;
-	int res;
 	LOGF("fallocate",path);
 	(void) fi;
 	return -EOPNOTSUPP;
@@ -373,7 +423,7 @@ static int partfuse_getxattr(const char *path, const char *name, char *value,
 			size_t size)
 {
 	LOGF("getxattr",path);
-	int res = lgetxattr(path, name, value, size);
+	ssize_t res = lgetxattr(path, name, value, size);
 	if (res == -1)
 		return -errno;
 	return res;
@@ -382,7 +432,7 @@ static int partfuse_getxattr(const char *path, const char *name, char *value,
 static int partfuse_listxattr(const char *path, char *list, size_t size)
 {
 	LOGF("listxattr",path);
-	int res = llistxattr(path, list, size);
+	ssize_t res = llistxattr(path, list, size);
 	if (res == -1)
 		return -errno;
 	return res;
@@ -391,7 +441,7 @@ static int partfuse_listxattr(const char *path, char *list, size_t size)
 static int partfuse_removexattr(const char *path, const char *name)
 {
 	LOGF("removexattr",path);
-	int res = lremovexattr(path, name);
+	ssize_t res = lremovexattr(path, name);
 	if (res == -1)
 		return -errno;
 	return 0;
@@ -400,41 +450,41 @@ static int partfuse_removexattr(const char *path, const char *name)
 
 static struct fuse_operations partfuse_oper = {
 	.getattr	= partfuse_getattr,
-	.access		= partfuse_access,
 	.readlink	= partfuse_readlink,
-	.readdir	= partfuse_readdir,
 	.mknod		= partfuse_mknod,
 	.mkdir		= partfuse_mkdir,
-	.symlink	= partfuse_symlink,
 	.unlink		= partfuse_unlink,
 	.rmdir		= partfuse_rmdir,
+	.symlink	= partfuse_symlink,
 	.rename		= partfuse_rename,
 	.link		= partfuse_link,
 	.chmod		= partfuse_chmod,
 	.chown		= partfuse_chown,
 	.truncate	= partfuse_truncate,
-#ifdef HAVE_UTIMENSAT
-	.utimens	= partfuse_utimens,
-#endif
 	.open		= partfuse_open,
 	.read		= partfuse_read,
 	.write		= partfuse_write,
 	.statfs		= partfuse_statfs,
 	.release	= partfuse_release,
 	.fsync		= partfuse_fsync,
-#ifdef HAVE_POSIX_FALLOCATE
-	.fallocate	= partfuse_fallocate,
-#endif
 #ifdef HAVE_SETXATTR
 	.setxattr	= partfuse_setxattr,
 	.getxattr	= partfuse_getxattr,
 	.listxattr	= partfuse_listxattr,
 	.removexattr	= partfuse_removexattr,
 #endif
+	.readdir	= partfuse_readdir,
+	.access		= partfuse_access,
+#ifdef HAVE_UTIMENSAT
+	.utimens	= partfuse_utimens,
+#endif
+#ifdef HAVE_POSIX_FALLOCATE
+	.fallocate	= partfuse_fallocate,
+#endif
 };
 
 void showUsage(char *argv[]) {
-	printf("Usage: %s DEVICE MOUNTPOINT\n", "partfuse");
+	printf("mbrfs %s built for fuse %d.%d.\nUsage: %s DEVICE MOUNTPOINT\n", OUR_TOOL_VERSION, FUSE_MAJOR_VERSION, FUSE_MINOR_VERSION, "partfuse");
 	fuse_main(1, argv, &partfuse_oper, NULL);
 }
 

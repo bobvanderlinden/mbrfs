@@ -1,12 +1,12 @@
 .PHONY: force
 
-CFLAGS = $(shell pkg-config fuse --cflags)
-LDFLAGS = $(shell pkg-config fuse --libs)
+CFLAGS = $(shell pkg-config fuse3 --cflags)
+LDFLAGS = $(shell pkg-config fuse3 --libs)
 
 all: mbrfs
 
 mbrfs: mbrfs.c
-	$(CC) $(CFLAGS) $(LDFLAGS) $< -o $@
+	$(CC) $(CFLAGS) $< -o $@  $(LDFLAGS)
 
 test: force
 	./mbrfs test.img -f test
