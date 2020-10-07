@@ -7,10 +7,9 @@ include(CheckSymbolExists)
 include(FindPkgConfig)
 include(GNUInstallDirs)
 include(Hardening)
+include(VersionFromGit)
 
-set(PROJECT_VERSION_MAJOR 0)
-set(PROJECT_VERSION_MINOR 1)
-set(PROJECT_VERSION "${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}")
+getVersionFromGit("PROJECT" "0.1")
 
 if(${CMAKE_VERSION} VERSION_GREATER "3.12") 
 	set(CMAKE_CXX_STANDARD 20)
