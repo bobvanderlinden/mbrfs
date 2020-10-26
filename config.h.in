@@ -1,0 +1,6 @@
+#cmakedefine HAVE_SETXATTR
+#cmakedefine HAVE_UTIMENSAT
+#cmakedefine HAVE_POSIX_FALLOCATE
+#cmakedefine HAVE_ATOI
+#cmakedefine HAVE_ITOA
+const char OUR_TOOL_VERSION[] = "@MBRFS_VERSION@";

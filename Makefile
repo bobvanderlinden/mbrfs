@@ -1,7 +1,7 @@
 .PHONY: force
 
-CFLAGS = $(shell pkg-config fuse --cflags)
-LDFLAGS = $(shell pkg-config fuse --libs)
+CFLAGS = $(shell pkg-config fuse3 --cflags)
+LDFLAGS = $(shell pkg-config fuse3 --libs)
 
 all: mbrfs
 
